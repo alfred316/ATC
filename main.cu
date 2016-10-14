@@ -19,7 +19,7 @@ __global__ void flight(struct drone, int n)
 	//drone.dx = ((rand() % 600 + 30)/3600) * 0.5;	
 
 	int i = 0;	
-	while (i < n)
+	if(i < n)
 	{
 		drone.dx = ((rand() % 600 + 30)/3600) * 0.5;
 		drone.dy = ((rand() % 600 + 30)/3600) * 0.5;
