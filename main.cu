@@ -4,35 +4,24 @@
 
 #define N 512
 
-struct Drone {
-	float x;
-	float y;
-	float dx;
-	float dy;
-}
 
-__global__ void flight(float x, float y, float dx, float dy, int n)
+__global__ void flight(float *x, float *y, float *dx, float *dy, int n)
 {
 	int i = threadIdx.x;
 	
-	x[i] = rand() % 129;
-	y[i] = rand() % 129;
-	
-	//drone.dx = ((rand() % 600 + 30)/3600) * 0.5;	
 	
 	if(i < n)
 	{
-		drone.x += dx;
-		drone.y += dy;
-		if(drone.x >= 128)
+		x[i] += dx[i];
+		y[i] += dy[i];
+		if(x[i] >= 128.00)
 		{
-			drone.x = drone.x * (-1);
+			x[i] = x[i] * (-1.00);
 		}		
-		if(drone.y >= 128)
+		if(y[i] >= 128.00)
 		{
-			drone.y = drone.y * (-1);
+			y[i] = y[i] * (-1.00);
 		}
-		printf("", drone.x, drone.y);
 		
 	}
 }
@@ -49,19 +38,22 @@ int main (void)
 	int size = sizeof(float);
 
 	//allocate device memory
-	cudaMalloc((void **), &d_x, size);
-	cudaMalloc((void **), &d_y, size);
-	cudaMalloc((void **), &d_dx, size);
-	cudaMalloc((void **), &d_dy, size);
+	cudaMalloc((void **)&d_x, size);
+	cudaMalloc((void **)&d_y, size);
+	cudaMalloc((void **)&d_dx, size);
+	cudaMalloc((void **)&d_dy, size);
 	
 	//allocate host memory
 	x = (float *)malloc(size);
 	y = (float *)malloc(size);
  	dx = (float *)malloc(size);
 	dy = (float *)malloc(size);
+	*x = rand() % 129; 
+	*y = rand() % 129;
 	*dx = ((rand() % 601 + 30)/3600) * 0.5;
 	*dy = ((rand() % 601 + 30)/3600) * 0.5;
-
+	cudaMemcpy(d_x, x, size, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_y, y, size, cudaMemcpyHostToDevice);
 	cudaMemcpy(d_dx, dx, size, cudaMemcpyHostToDevice);
 	cudaMemcpy(d_dy, dy, size, cudaMemcpyHostToDevice);
 	
