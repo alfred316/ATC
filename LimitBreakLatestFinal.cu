@@ -14,9 +14,9 @@ Latest Update: April 1st 2017
 #include <curand.h>
 #include <curand_kernel.h>
 #include <time.h>
-#include <windows.h>
+#include <unistd.h>
 
-#define N 2048 
+#define N 32640 //needs to be a multiple of 128 (block size) //32640
 #define pi 3.14159265358979323846
 
 
@@ -33,14 +33,15 @@ int *col; //if on collision course
 float *timeTill; //shorted time until next collision
 int *colWith; //drone we will collide with
 int *rMatchWith; //what radar matched with
-
-} drones[N], sortedDrones[N];
+int *rMatch;
+} drones[N];
 
 struct radar
 {
 	float *rx;
 	float *ry;
 	int *rMatch; //0, 1 or -1 based on not hit, hit, or hit too many times
+	int *rMatchWith;
 } radars[N];
 
 
@@ -65,14 +66,46 @@ __global__ void setupFlight(float *x, float *y, float *dx, float *dy, float *alt
 		x[i] = curand(&states[i]) % 129;
 		y[i] = curand(&states[i]) % 129;
 
+		int tmpx = curand(&states[i]) % 50;
+		if (tmpx % 2 == 0)
+		{
+			x[i] = -1 * x[i];
+		}
+		int tmpy = curand(&states[i]) % 50;
+		if (tmpy % 2 != 0)
+		{
+			y[i] = -1 * y[i];
+		}
+
+		float S = 0.f;
 		//calculate random speed
 		dx[i] = (curand(&states[i]) % 601 + 30);
 		dy[i] = (curand(&states[i]) % 601 + 30);
+
+		S = (curand(&states[i]) % 601 + 30);
+
+		float tmpVel = pow(S, 2) - pow(dx[i], 2);
+		tmpVel = fabsf(tmpVel);
+		dy[i] = sqrt(tmpVel);
+
+		//dy[i] = fabsf(dy[i]);
+
 		//knots per half second
 		dx[i] = (dx[i] / 3600) * 0.5;
 		dy[i] = (dy[i] / 3600) * 0.5;
 
-		alt[i] = (curand(&states[i]) % 6001 + 3000);
+		int tmpdx = curand(&states[i]) % 50;
+		if (tmpdx % 2 == 0)
+		{
+			dx[i] = -1 * dx[i];
+		}
+		int tmpdy = curand(&states[i]) % 50;
+		if (tmpdy % 2 != 0)
+		{
+			dy[i] = -1 * dy[i];
+		}
+
+		alt[i] = (curand(&states[i]) % 6001 + 500);
 
 		col[i] = 0;
 
@@ -96,6 +129,32 @@ __global__ void GenerateRadarData(float *x, float *y, float *dx, float *dy, floa
 	//create radar by adding random noise to new x and y
 	rx[i] = x[i] + dx[i] + r;
 	ry[i] = y[i] + dy[i] + s;
+
+	int tmps = curand(&states[i]) % 50;
+	if (tmps % 2 == 0)
+	{
+		s = -1 * s;
+	}
+	int tmpr = curand(&states[i]) % 50;
+	if (tmpr % 2 != 0)
+	{
+		r = -1 * r;
+	}
+
+
+	//create radar by adding random noise to new x and y
+	rx[i] = x[i] + dx[i] + r;
+	ry[i] = y[i] + dy[i] + s;
+
+	if (rx[i] >= 128.00)
+	{
+		rx[i] = rx[i] * (-1.00);
+	}
+	if (ry[i] >= 128.00)
+	{
+		ry[i] = ry[i] * (-1.00);
+	}
+
 	//stores 0, 1 or -1 based on how many planes hit this radar
 	rMatch[i] = 0;
 }
@@ -107,7 +166,7 @@ __global__ void TrackDrone(float *x, float *y, float *dx, float *dy, float *rx, 
 	if(i < N)
 	{
 	
-		float bound = 1;
+		float bound = 0.5;
 		int count = 0;
 
 		//move planes 
@@ -125,76 +184,118 @@ __global__ void TrackDrone(float *x, float *y, float *dx, float *dy, float *rx, 
 		}
 
 		//stores the index of the radar corrolated
+		//radar
 		rMatchWith[i] = -1;
-
-		__syncthreads();
+		//drones
+		rMatch[i] = 0;
+		//_syncthreads();
 
 
 		//check against all radars to see if we hit any
 		for (int p = 0; p < N; p++)
 		{
-			__syncthreads();
+			
 			//check if new x and y are within 1 nautical mile of radar x and y
-			if ((x[p] < (rx[i] + bound) && x[p] > (rx[i] - bound)) && (y[p] < (ry[i] + bound) && y[p] > (ry[i] - bound)))
+			if ((rx[i] < (x[p] + bound) && rx[i] > (x[p] - bound)) && (ry[i] < (y[p] + bound) && ry[i] > (y[p] - bound)))
 			{
 				//once one is found, change the value of srmatch[p] to 1
 				//change value of rmatch[i] to p to store the radar we hit and corrolate it to the plane i
 				//int set = 0;
-				if (rMatch[i] == 0)
+				if (rMatch[p] == 0)
 				{
-					rMatch[i] = 1;
-					
+					rMatch[p] = 1;
+
 				}
-				//if a second one is found change srmatch[p] to -1
-				else if (rMatch[i] == 1)
+				//if a second radar matches this drone set drone rmatch to -1 to discard drone matching
+				else if (rMatch[p] == 1)
 				{
-					rMatch[i] = -1;
-					
+					rMatch[p] = -1;
+
 				}
 
-				rMatchWith[p] = i;
-				__syncthreads();
+				//first aircraft for radar to match with
+				if(rMatchWith[i] == -1)
+				{
+					rMatchWith[i] = p;
+				}
+				//radar has matched an aircraft before, must be discarded for matching multiple aircrafts
+				else
+				{
+					int tmp = rMatchWith[i]; //find previously matched drone
+					rMatch[tmp] = 0; //unmatch previously matched drone
+					rMatch[p] = 0;
+					rMatchWith[i] = -2; //-2 means we are discarding it
+					break;
+				}
+
+				
+				//_syncthreads();
 			}
 		}
 
+		
+		int doneMatching = 0;
 
 		//check if there are planes and radars that didnt match, double the bounding box and repeat, up to twice
 		//here we go back to having the planes use each thread i index and iterate through the p radars
-		if (rMatchWith[i] == -1)
+		if (rMatchWith[i] == -1) //-1 means not matched yet. 1 means matched, -2 means discarded
 		{
 			while (count < 2)
 			{
-				//check against all radars to see if we hit any
+				switch (count)
+				{
+				case 0:
+					bound = bound * 2;
+					break;
+
+				case 1:
+					bound = bound * 4;
+					break;
+				}
+				//check against all drones 
 				for (int p = 0; p < N; p++)
 				{
-					__syncthreads();
+					
 
-					if (rMatch[p] == 0)
+					if (rMatch[p] == 0) //drone hasnt been matched once
 					{
-						switch (count)
-						{
-						case 0:
-							bound = bound * 2;
-							break;
 
-						case 1:
-							bound = bound * 4;
-							break;
-						}
-						//check if new x and y are within 1 nautical mile of radar x and y
-						if ((x[i] < (rx[p] + bound) && x[i] > (rx[p] - bound)) && (y[i] < (ry[p] + bound) && y[i] > (ry[p] - bound)))
+						//check if radar is within drone bounds
+						if ((rx[i] < (x[p] + bound) && rx[i] > (x[p] - bound)) && (ry[i] < (y[p] + bound) && ry[i] > (y[p] - bound)))
 						{
 							//once one is found, change the value of srmatch[p] to 1
 							//change value of rmatch[i] to p to store the radar we hit and corrolate it to the plane i
 
 							rMatch[p] = 1;
 
-							rMatchWith[i] = p;
-							__syncthreads();
+							//first aircraft for radar to match with
+							if (rMatchWith[i] == -1)
+							{
+								rMatchWith[i] = p;
+								doneMatching = 1;
+							}
+							//radar has matched an aircraft before, must be discarded for matching multiple aircrafts
+							else
+							{
+								int tmp = rMatchWith[i]; //find previously matched drone
+								rMatch[tmp] = -1; //unmatch previously matched drone
+								rMatchWith[i] = -2; //-2 means we are discarding it
+								break;
+							}
+
 						}
 					}
+
+					if (doneMatching == 1)
+						break; //if matched, we dont need to check anymore
 				}
-				count += 1;
+				if (doneMatching == 0)
+				{
+					count += 1;
+				}
+				else if (doneMatching == 1)
+					break; //if matched, we dont need to check anymore
+				
 			}
 		}
 
@@ -202,30 +303,30 @@ __global__ void TrackDrone(float *x, float *y, float *dx, float *dy, float *rx, 
 		//if srmatch[rmatch[i]] == 1, then change new x and y to radar x and y
 		//else if srmatch[rmatch[i]] == -1 (hit more than once) or 0 (never hit) then ignore and keep using new x and y
 		int m = (int)rMatchWith[i];
-		if(m != -1)
+		if (m != -1 && m != -2)
 		{
 			if (rMatch[m] == 1)
 			{
-				x[i] = rx[m];
-				y[i] = ry[m];
-				__syncthreads();
+				x[m] = rx[i];
+				y[m] = ry[i];
+				//_syncthreads();
 			}
 		}
-		
 
+		
 		//otherwise, use new x and y without radar position
 
 	}
-	__syncthreads();
+	//_syncthreads();
 }
 
 //move the aircraft by adding its velocity to it's current location
-__global__ void CheckCollisionPath(float *x, float *y, float *batx, float *baty, float *dx, float *dy, int *col, float *timeTill, int * colWith)
+__global__ void CheckCollisionPath(float *x, float *y, float *batx, float *baty, float *dx, float *dy, int *col, float *timeTill, int * colWith, float * alt)
 {
 	int i = threadIdx.x + blockIdx.x * blockDim.x;
 
-	
-	float angle, theta, cs, sn;
+	int angle;
+	float theta, cs, sn;
 
 	//calculate shared values
 	if (i < N)
@@ -235,15 +336,16 @@ __global__ void CheckCollisionPath(float *x, float *y, float *batx, float *baty,
 		timeTill[i] = 300.0;
 		colWith[i] = -1;
 		col[i] = 0;
-
+		batx[i] = x[i];
+		baty[i] = y[i];
 		//wait for calculations to be done on all threads
-		__syncthreads();
+		//_syncthreads();
 
 		//iterate through calculated next x and y's for all drones to see if any collisions happen
 		//bounding box is 1 nautical mile on each side (so just +-1 on x and y)
 
-		float bound = 1.5; //in nautical miles
-		float angleBase = 1; //in degrees
+		//float bound = 1.5; //in nautical miles
+		float angleBase = 5; //in degrees
 
 
 							 //for loop to check path up to 20 minutes ahead
@@ -256,13 +358,10 @@ __global__ void CheckCollisionPath(float *x, float *y, float *batx, float *baty,
 		for (t = 20; t < 21; t++)
 		{
 			//every iteration check for collision, if yes, then go back to beginning, fix angle and check again up to 3 times
-			if (chk < 3)
+			for (int p = 0; p < N; p++)
 			{
 
-				angle = angleBase + (angleBase * chk);
-				theta = (angle)*((pi) / (180.0));
-				cs = cos(theta);
-				sn = sin(theta);
+				
 
 				//get the upper and lower bounds for x and y at the projected time
 				//i is our track plane and p is the trial plane
@@ -277,50 +376,32 @@ __global__ void CheckCollisionPath(float *x, float *y, float *batx, float *baty,
 
 				//iterate through the drones and compare them to the current drone this thread is handling
 				//each thread does an interation on all drones, if collision occures, mark both drones as 1
-				for (int p = 0; p < N; ++p)
+				if (i != p && p < N && (alt[p] < (alt[i] + 500) && alt[p] > (alt[i] - 500)))
 				{
-					//make sure we are not comparing the same planes with each other
-					if (i != p)
-					{
 
-						//check if any plane already within bounding box on BOTH x and y
-						//if ((batx[p] < (batx[i] + bound) && batx[p] > (batx[i] - bound)) && (baty[p] < (baty[i] + bound) && baty[p] > (baty[i] - bound)))
-						//{
-						//	//move x and y by a certain angle 
-						//	batx[i] = cs[i] * x[i] - sn[i] * y[i];
-						//	baty[i] = sn[i] * x[i] + cs[i] * y[i];
-						//	__syncthreads();
-
-						//	//reset timer and increment check and try again by calling a break out of p loop
-						//	t = 19;
-						//	chk += 1;
-						//	break;
-						//}
-						//otherwise do batcher's algorithm
-
-						//actual batcher's algorithm code
-
-						float minX, maxX, minY, maxY, timeMin, timeMax;
+					float minX, maxX, minY, maxY, timeMin, timeMax;
 						float tmpX, tmpY;
 
+
+
 						//get min_x
-						tmpX = (batx[p] +(t * 120 * dx[i]) )- (batx[i] + (t * 120 * dx[i]));
+						tmpX = (x[p] +(t * 120 * dx[i]) )- (batx[i] + (t * 120 * dx[i]));
 						minX = fabsf(tmpX);
 						minX = minX - 3;
 						minX = minX / fabsf(dx[p] - dx[i]);
 						//get max_x
-						tmpX = (batx[p] + (t * 120 * dx[i])) - (batx[i] + (t * 120 * dx[i]));
+						tmpX = (x[p] + (t * 120 * dx[i])) - (batx[i] + (t * 120 * dx[i]));
 						maxX = fabsf(tmpX);
 						maxX = maxX + 3;
 						maxX = maxX / fabsf(dx[p] - dx[i]);
 
 						//get min_y
-						tmpY = (baty[p] + (t * 120 * dy[i])) - (baty[i] + (t * 120 * dy[i]));
+						tmpY = (y[p] + (t * 120 * dy[i])) - (baty[i] + (t * 120 * dy[i]));
 						minY = fabsf(tmpY);
 						minY = minY - 3;
 						minY = minY / fabsf(dy[p] - dy[i]);
 						//get max_y
-						tmpY = (baty[p] + (t * 120 * dy[i])) - (baty[i] + (t * 120 * dy[i]));
+						tmpY = (y[p] + (t * 120 * dy[i])) - (baty[i] + (t * 120 * dy[i]));
 						maxY = fabsf(tmpY);
 						maxY = maxY + 3;
 						maxY = maxY / fabsf(dy[p] - dy[i]);
@@ -329,60 +410,81 @@ __global__ void CheckCollisionPath(float *x, float *y, float *batx, float *baty,
 						timeMin = max(minX, minY);
 						timeMax = min(maxX, maxY);
 
-						//check to see if collision will happen on this path
-						if (timeMin < timeMax)
-						{
-							if (timeMin < timeTill[p])
-							{
-								//update with the soonest collision time 
-								timeTill[p] = timeMin;
+					//make sure we are not comparing the same planes with each other and that the planes are within 1000 nautical miles of each other
+					if (timeMin < timeMax)
+					{
 
-							}
-							if (timeMin < timeTill[i])
+						if (timeMin < timeTill[i])
 							{
+
+								chk++;
+
 								//update with the soonest collision time 
 								timeTill[i] = timeMin;
 
+								angle = angleBase;
+
+								if(angle < 30)
+								{
+
+									if(angle > 0)
+									{
+										angle = (-1) * angle;
+									}
+									else if(angle < 0)
+									{
+										angle = (-1) * angle;
+										angle += 5;
+									}
+								}
+								theta = (angle)*((pi) / (180.0));
+								cs = cos(theta);
+								sn = sin(theta);
+
+
+								//set collision variables collision
+								col[i] = 1;
+								col[p] = 1;
+								colWith[i] = p;
+								colWith[p] = i;
+								//_syncthreads();
+								//change course and see if we're still on a collision course
+
+								//move x and y by a certain angle 
+								batx[i] = cs * x[i] - sn * y[i];
+								baty[i] = sn * x[i] + cs * y[i];
+								//_syncthreads();
+								/*batx[p] = cs * x[p] + sn * y[p];
+								baty[p] = sn * x[p] + cs * y[p];
+								//_syncthreads();*/
+								//reset timer and increment check and try again by calling a break out of p loop 
+								//and reset t loop back to 20 so repeat the process with new batx and baty and increment check
+								t = 19;
+								//chk += 1;
+								break;
 							}
+						
+						
+					}
+				}
 
-							//set collision variables collision
-							col[i] = 1;
-							col[p] = 1;
-							colWith[i] = p;
-							colWith[p] = i;
-							__syncthreads();
-							//change course and see if we're still on a collision course
-
-							//move x and y by a certain angle 
-							batx[i] = cs * x[i] - sn * y[i];
-							baty[i] = sn * x[i] + cs * y[i];
-							__syncthreads();
-							//reset timer and increment check and try again by calling a break out of p loop 
-							//and reset t loop back to 20 so repeat the process with new batx and baty and increment check
-							t = 19;
-							chk += 1;
-							break;
-						}
-						//check if no collision but course corrected AND we have finished checking all planes to assign new x and y based on course correction
-						if (chk > 0 && chk < 3 && !(timeMin < timeMax) && p == N - 1)
+				//check if no collision but course corrected AND we have finished checking all planes to assign new x and y based on course correction
+						if (chk > 0 && p == (N - 1))
 						{
 							x[i] = batx[i];
 							y[i] = baty[i];
+							//_syncthreads();
 							col[i] = 0;
 							col[p] = 0;
 							colWith[i] = -1;
 							colWith[p] = -1;
-							__syncthreads();
+							//_syncthreads();
 						}
 						//else if no collision and no course correction then do nothing to x and y
-
-					}
-				}
 
 			}
 
 		}
-
 
 
 	}
@@ -412,12 +514,12 @@ int main(void)
 	//set up host copies
 	float *x, *y, *batx, *baty, *dx, *dy, *alt, *rx, *ry;
 	//set up device copies
-	float *d_x, *d_y, *d_dx, *d_dy, *d_alt;
+	//float *d_x, *d_y, *d_dx, *d_dy, *d_alt;
 	int size = sizeof(float) * N;
-	int *col, *d_col, *rMatch, *rMatchWith;
-	float *angle, *theta, *cs, *sn, *d_cs, *d_sn;
+	int *col, *rMatch, *rMatchWith;
+	float *cs, *sn, *d_cs, *d_sn;
 	float *h_timeTill, *h_colWith; // *h_upx, *h_upy, *h_lowx, *h_lowy;
-	float *d_timeTill, *d_colWith; // *d_upx, *d_upy, *d_lowx, *d_lowy;
+	//float *d_timeTill, *d_colWith; // *d_upx, *d_upy, *d_lowx, *d_lowy;
 
 
 								   /* CUDA's random number library uses curandState_t to keep track of the seed value
@@ -428,11 +530,11 @@ int main(void)
 	cudaMalloc((void**)&states, N * sizeof(curandState_t));
 
 	//file
-	FILE *file;
+	/*FILE *file;
 	char *fileName = "drones.csv";
 	file = fopen(fileName, "w+");
 	fprintf(file, "Drone Id, X, Y, dX, dY, Collision\n");
-
+	*/
 	//drone *Drones = new drone;
 
 	//allocate host memory
@@ -442,8 +544,8 @@ int main(void)
 	dy = (float*)malloc(size);
 	alt = (float*)malloc(size);
 	col = (int*)malloc(sizeof(int) * N);
-	angle = (float*)malloc(size);
-	theta = (float*)malloc(size);
+	//angle = (float*)malloc(size);
+	//theta = (float*)malloc(size);
 	cs = (float*)malloc(size);
 	sn = (float*)malloc(size);
 	h_timeTill = (float*)malloc(size);
@@ -476,6 +578,8 @@ int main(void)
 	cudaMalloc((void**)&radars->ry, size);
 	cudaMalloc((void**)&radars->rMatch, sizeof(int)*N);
 	cudaMalloc((void**)&drones->rMatchWith, sizeof(int)*N);
+	cudaMalloc((void**)&drones->rMatch, sizeof(int)*N);
+	cudaMalloc((void**)&radars->rMatchWith, sizeof(int)*N);
 	/*cudaMalloc((void**)&d_upx, size);
 	cudaMalloc((void**)&d_upy, size);
 	cudaMalloc((void**)&d_lowx, size);
@@ -501,6 +605,8 @@ int main(void)
 	cudaMemcpy(radars->ry, ry, size, cudaMemcpyHostToDevice);
 	cudaMemcpy(radars->rMatch, rMatch, sizeof(int)*N, cudaMemcpyHostToDevice);
 	cudaMemcpy(drones->rMatchWith, rMatchWith, sizeof(int)*N, cudaMemcpyHostToDevice);
+	cudaMemcpy(drones->rMatch, rMatch, sizeof(int)*N, cudaMemcpyHostToDevice);
+	cudaMemcpy(radars->rMatchWith, rMatchWith, sizeof(int)*N, cudaMemcpyHostToDevice);
 	/*cudaMemcpy(d_upx, h_upx, size, cudaMemcpyHostToDevice);
 	cudaMemcpy(d_upy, h_upy, size, cudaMemcpyHostToDevice);
 	cudaMemcpy(d_lowx, h_lowx, size, cudaMemcpyHostToDevice);
@@ -509,15 +615,15 @@ int main(void)
 	//init drones positions, velocity, and first "next position"
 	int blocks = 0;
 	int threads = 0;
-	if (N < 128)
+	if (N < 96)
 	{
 		blocks = (N + (N - 1)) / N;
 		threads = N;
 	}
 	else
 	{
-		blocks = (N + 127) / 128;
-		threads = 128;
+		blocks = (N + 95) / 96;
+		threads = 96;
 	}
 
 	cudaEventRecord(setupStart);
@@ -552,7 +658,7 @@ int main(void)
 
 	/*GENERATE INITIAL RADAR REPORTS*/
 	/*RADAR INIT KERNEL*/
-	GenerateRadarData << <blocks, threads >> > (drones->x, drones->y, drones->dx, drones->dy, radars->rx, radars->ry, radars->rMatch, time(NULL), states);
+	GenerateRadarData << <blocks, threads >> > (drones->x, drones->y, drones->dx, drones->dy, radars->rx, radars->ry, drones->rMatch, time(NULL), states);
 
 	cudaMemcpy(rx, radars->rx, size, cudaMemcpyDeviceToHost);
 	cudaMemcpy(ry, radars->ry, size, cudaMemcpyDeviceToHost);
@@ -592,7 +698,10 @@ int main(void)
 	//each count represents half a second
 	int count = 0;
 	//duration is how many seconds we want to test this for multiplied by 2
-	int duration = 16;
+	int duration = 64;
+
+	float trackTime[duration];
+	float cdrTime[4];
 
 	//loop infinitely until the duration condition is met
 	//each iteration run the moveDrone kernel function to move the drone and check collision
@@ -607,7 +716,7 @@ int main(void)
 		cudaMemcpy(radars->rMatch, rMatch, sizeof(int)*N, cudaMemcpyHostToDevice);
 		cudaEventRecord(trackingStart);
 		//implement tracking with radar in it's own kernel function before collision detection and resolution
-		TrackDrone << <blocks, threads >> > (drones->x, drones->y, drones->dx, drones->dy, radars->rx, radars->ry, radars->rMatch, drones->rMatchWith);
+		TrackDrone << <blocks, threads >> > (drones->x, drones->y, drones->dx, drones->dy, radars->rx, radars->ry, drones->rMatch, radars->rMatchWith);
 		cudaEventRecord(trackingEnd);
 		cudaEventSynchronize(trackingEnd);
 
@@ -615,13 +724,14 @@ int main(void)
 		cudaEventElapsedTime(&trackingTime, trackingStart, trackingEnd);
 		printf("Each Iteration of Flights Tracking Time for %d drones: %f ms\n", N, trackingTime);
 
+		trackTime[count] = trackingTime;
 
 		cudaMemcpy(x, drones->x, size, cudaMemcpyDeviceToHost);
 		cudaMemcpy(y, drones->y, size, cudaMemcpyDeviceToHost);
 		cudaMemcpy(rx, radars->rx, size, cudaMemcpyDeviceToHost);
 		cudaMemcpy(ry, radars->ry, size, cudaMemcpyDeviceToHost);
-		cudaMemcpy(rMatch, radars->rMatch, sizeof(int)*N, cudaMemcpyDeviceToHost);
-		cudaMemcpy(rMatchWith, drones->rMatchWith, sizeof(int)*N, cudaMemcpyDeviceToHost);
+		cudaMemcpy(rMatch, drones->rMatch, sizeof(int)*N, cudaMemcpyDeviceToHost);
+		cudaMemcpy(rMatchWith, radars->rMatchWith, sizeof(int)*N, cudaMemcpyDeviceToHost);
 
 		/*for (int k = 0; k < N; k++)
 		{
@@ -635,23 +745,43 @@ int main(void)
 		//Collision detection & resolution
 		//happens only three times during entire duration
 
-		int half_dur = duration / 2;
+		//int half_dur = duration / 2;
 		int almostDone = duration - 1;
 		float CollisionDetectionTime = 0;
 
-		if (count == 0 || count == half_dur || count == almostDone)
+		if (count == 15 || count == 31 || count == 47 || count == 63)
 		{
+
+			/*cudaMemcpy(drones->x, x, size, cudaMemcpyHostToDevice);
+			cudaMemcpy(drones->y, y, size, cudaMemcpyHostToDevice);*/
+
 			cudaEventRecord(CollisionDetectionStart);
 			//add terrain avoidance kernel too somewhere
 
 			//only do collision detection and resolution every few seconds and not every half second step
-			CheckCollisionPath << <blocks, threads >> >(drones->x, drones->y, drones->batx, drones->baty, drones->dx, drones->dy, drones->col, drones->timeTill, drones->colWith);
+			CheckCollisionPath << <blocks, threads >> >(drones->x, drones->y, drones->batx, drones->baty, drones->dx, drones->dy, drones->col, drones->timeTill, drones->colWith, drones->alt);
 
 			cudaEventRecord(CollisionDetectionEnd);
 			cudaEventSynchronize(CollisionDetectionEnd);
 
 			cudaEventElapsedTime(&CollisionDetectionTime, CollisionDetectionStart, CollisionDetectionEnd);
 			printf("Collision detection & resolution for %d drones: %f ms\n", N, CollisionDetectionTime);
+
+			switch(count)
+			{
+			case 15:
+				cdrTime[0] = CollisionDetectionTime;
+				break;
+			case 31:
+				cdrTime[1] = CollisionDetectionTime;
+				break;
+			case 47:
+				cdrTime[2] = CollisionDetectionTime;
+				break;
+			case 63:
+				cdrTime[3] = CollisionDetectionTime;
+				break;
+			}
 
 			cudaMemcpy(x, drones->x, size, cudaMemcpyDeviceToHost);
 			cudaMemcpy(y, drones->y, size, cudaMemcpyDeviceToHost);
@@ -661,15 +791,15 @@ int main(void)
 			cudaMemcpy(h_timeTill, drones->timeTill, size, cudaMemcpyDeviceToHost);
 			cudaMemcpy(h_colWith, drones->colWith, size, cudaMemcpyDeviceToHost);
 
-			/*for (int k = 0; k < N; k++)
-			{
-			printf("Drone #:%d x: %f, y: %f, dx: %f, dy: %f, col: %d\n", k, x[k], y[k], dx[k], dy[k], col[k]);
-			fprintf(file, "%d, %f, %f, %f, %f, %d\n", k, x[k], y[k], dx[k], dy[k], col[k]);
-			}*/
+			//for (int k = 0; k < N; k++)
+			//{
+			//printf("Drone #:%d x: %f, y: %f, dx: %f, dy: %f, col: %d\n", k, x[k], y[k], dx[k], dy[k], col[k]);
+			//fprintf(file, "%d, %f, %f, %f, %f, %d\n", k, x[k], y[k], dx[k], dy[k], col[k]);
+			//}
 		}
 
 		/*GENERATE NEW RADAR REPORTS*/
-		GenerateRadarData << <blocks, threads >> > (drones->x, drones->y, drones->dx, drones->dy, radars->rx, radars->ry, radars->rMatch, time(NULL), states);
+		GenerateRadarData << <blocks, threads >> > (drones->x, drones->y, drones->dx, drones->dy, radars->rx, radars->ry, drones->rMatch, time(NULL), states);
 
 		cudaMemcpy(rx, radars->rx, size, cudaMemcpyDeviceToHost);
 		cudaMemcpy(ry, radars->ry, size, cudaMemcpyDeviceToHost);
@@ -722,7 +852,7 @@ int main(void)
 		if (timeLeft > 0)
 		{
 			//sleep works with ms
-			Sleep(timeLeft);
+			usleep(timeLeft * 1000);
 		}
 	}
 
@@ -733,6 +863,49 @@ int main(void)
 	float allTime;
 	cudaEventElapsedTime(&allTime, allStart, allEnd);
 	printf("Total Execution Time for %d flights: %f ms\n", N, allTime);
+
+	//fclose(file);
+
+	cudaDeviceProp prop;
+	cudaGetDeviceProperties(&prop, 0);
+	//printf("Name: %s \n", prop.name);
+	char *deviceName = prop.name;
+	char *fext = ".csv";
+	float strsize = strlen(deviceName) + strlen(fext);
+	//file
+	FILE *file;
+	char* fileName;
+	fileName = (char *)malloc(strsize);
+	strcpy(fileName, deviceName);
+	strcat(fileName, fext);
+	file = fopen(fileName, "w+");
+	if(N == 96)
+	{
+		fprintf(file, "AircraftCount, Track, CDR, Track+CDR\n");
+	}
+	
+
+	float sum = 0;
+	for(int h = 0; h < duration; h++)
+	{
+		sum += trackTime[h];
+	}
+
+	float avgTrack = sum / duration;
+	printf("\naverage execution time for tracking and correlation task: %f ms\n", avgTrack);
+
+	float cdrSum = 0;
+	for(int l = 0; l < 4; l++)
+	{
+		cdrSum += cdrTime[l];
+	}
+
+	float avgCdr = cdrSum / 4;
+	printf("average execution time for collision detection and resolution task: %f ms\n", avgCdr);
+
+	float allTaskAvg = avgCdr + avgTrack;
+	printf("average execution time for both tasks combined per cycle task: %f ms\n", allTaskAvg);
+	fprintf(file, "%d, %f, %f, %f\n", N, avgTrack, avgCdr, allTaskAvg);
 
 	fclose(file);
 
